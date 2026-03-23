@@ -1,1 +1,46 @@
+name: ModelFit Bot Runner
 
+on:
+  schedule:
+    - cron: '*/3 * * * *'  # Cada 3 minutos
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Cache pip packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+    
+    - name: Run ModelFit Bot
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
+        META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
+        META_VERIFY_TOKEN: ${{ secrets.META_VERIFY_TOKEN }}
+      run: |
+        python main.py
+    
+    - name: Commit conversation database
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add database/conversations.db || true
+        git diff --quiet && git diff --staged --quiet || git commit -m "Update conversations [$(date +%Y-%m-%d-%H:%M:%S)]"
+        git push || true
+      continue-on-error: true
