@@ -1,0 +1,79 @@
+name: ModelFit Bot Runner
+
+on:
+  schedule:
+    - cron: '*/3 * * * *'  # Ejecuta cada 3 minutos
+  workflow_dispatch:        # Permite ejecución manual
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v4
+    
+    - name: Configurar Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Cache dependencias pip
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Instalar dependencias
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Ejecutar ModelFit Bot
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
+        META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
+        META_VERIFY_TOKEN: ${{ secrets.META_VERIFY_TOKEN }}
+        MAX_DAILY_MESSAGES: ${{ secrets.MAX_DAILY_MESSAGES || '50' }}
+        TIMEZONE: ${{ secrets.TIMEZONE || 'America/Santiago' }}
+      run: |
+        echo "🏋️  Iniciando ejecución de ModelFit Bot..."
+        python main.py
+        echo "✅ Ejecución completada"
+    
+    - name: Guardar base de datos de conversaciones
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Actions"
+        
+        # Verificar si hay cambios en la base de datos
+        if [ -f database/conversations.db ]; then
+          git add database/conversations.db
+        fi
+        
+        # Verificar si hay cambios en logs
+        if [ -f logs/execution.log ]; then
+          git add logs/execution.log
+        fi
+        
+        # Commit solo si hay cambios
+        if git diff --staged --quiet; then
+          echo "📦 No hay cambios para guardar"
+        else
+          git commit -m "🤖 Actualización automática - $(date +'%Y-%m-%d %H:%M:%S')"
+          git push || echo "⚠️  No se pudo hacer push, posible conflicto"
+        fi
+      continue-on-error: true
+    
+    - name: Subir artefactos de logs (si falla)
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: error-logs-${{ github.run_id }}
+        path: |
+          logs/
+          *.log
+        retention-days: 5
