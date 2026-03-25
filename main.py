@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
-"""
-ModelFit Bot - Asistente virtual de fitness
-Ejecutar: python main.py
-"""
-
 import sys
 import os
 
-# Asegurar que src está en path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.modelfit_bot import ModelFitBot
+# DEBUG SIMPLE
+from src.meta_api import MetaAPI
 
-def main():
-    """Función principal."""
-    try:
-        # Inicializar bot
-        bot = ModelFitBot()
+print("🔍 TEST DE CONEXIÓN")
+try:
+    api = MetaAPI()
+    print(f"✅ API inicializada")
+    print(f"   Page ID: {api.page_id}")
+    print(f"   Token: {api.access_token[:15]}...")
+    
+    # Probar lectura
+    print("\n📨 Probando leer mensajes...")
+    msgs = api.get_unread_messages(limit=5)
+    print(f"   Encontrados: {len(msgs)} mensajes")
+    
+    for m in msgs:
+        print(f"   - {m['from_name']}: {m['text'][:40]}...")
         
-        # Ejecutar un ciclo de procesamiento
-        bot.run_cycle()
-        
-        print("🎯 ModelFit Bot completó su ciclo exitosamente")
-        
-    except Exception as e:
-        print(f"💥 Error fatal en ModelFit Bot: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
+    print("\n💬 Probando leer comentarios...")
+    comments = api.get_recent_comments(post_limit=3)
+    print(f"   Encontrados: {len(comments)} comentarios")
+    
+    print("\n✅ TODO FUNCIONA - El bot debería responder")
+    
+except Exception as e:
+    print(f"\n❌ ERROR: {e}")
+    import traceback
+    traceback.print_exc()
