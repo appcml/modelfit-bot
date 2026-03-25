@@ -1,10 +1,12 @@
-name: Debug ModelFit Bot
+name: ModelFit Bot Runner
 
 on:
-  workflow_dispatch:
+  schedule:
+    - cron: '*/3 * * * *'  # Cada 3 minutos
+  workflow_dispatch:        # Manual también disponible
 
 jobs:
-  debug:
+  run-bot:
     runs-on: ubuntu-latest
     
     steps:
@@ -14,14 +16,24 @@ jobs:
       with:
         python-version: '3.11'
     
-    - name: Instalar dependencias
-      run: pip install requests python-dotenv
+    - name: Cache pip
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
     
-    - name: Ejecutar diagnóstico
+    - name: Instalar dependencias
+      run: pip install -r requirements.txt
+    
+    - name: 🔍 DIAGNÓSTICO DE CONEXIÓN
       env:
         META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
         META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
       run: |
+        echo "=========================================="
+        echo "🔍 DIAGNÓSTICO MODELFIT BOT"
+        echo "=========================================="
+        
         python -c "
 import os
 import requests
@@ -29,159 +41,71 @@ import requests
 TOKEN = os.getenv('META_PAGE_ACCESS_TOKEN')
 PAGE_ID = os.getenv('META_PAGE_ID')
 
-print('='*60)
-print('🔍 DIAGNÓSTICO MODELFIT BOT')
-print('='*60)
-
-if not TOKEN:
-    print('❌ ERROR: META_PAGE_ACCESS_TOKEN no encontrado')
+if not TOKEN or not PAGE_ID:
+    print('❌ ERROR: Faltan variables de entorno')
     exit(1)
 
-if not PAGE_ID:
-    print('❌ ERROR: META_PAGE_ID no encontrado')
-    exit(1)
-
-print(f'✅ Token encontrado: {TOKEN[:20]}...')
+print(f'✅ Token: {TOKEN[:15]}...')
 print(f'✅ Page ID: {PAGE_ID}')
 print()
 
-# Test 1: Verificar token
-print('📡 Test 1: Verificando token...')
-me_url = f'https://graph.facebook.com/v18.0/me?access_token={TOKEN}'
-r = requests.get(me_url)
-
+# Test 1: Token válido
+url = f'https://graph.facebook.com/v18.0/me?access_token={TOKEN}'
+r = requests.get(url)
 if r.status_code == 200:
-    data = r.json()
-    print(f'✅ Token válido')
-    print(f'   App: {data.get(\"name\", \"N/A\")}')
-    print(f'   ID: {data.get(\"id\", \"N/A\")}')
+    print('✅ Token válido')
 else:
-    error = r.json().get('error', {})
-    print(f'❌ Token inválido')
-    print(f'   Error: {error.get(\"message\", \"Desconocido\")}')
+    print(f'❌ Token inválido: {r.json()}')
     exit(1)
-print()
 
-# Test 2: Verificar página
-print('📄 Test 2: Verificando página...')
-page_url = f'https://graph.facebook.com/v18.0/{PAGE_ID}?fields=name,access_token&access_token={TOKEN}'
-r = requests.get(page_url)
-
+# Test 2: Página
+url = f'https://graph.facebook.com/v18.0/{PAGE_ID}?fields=name&access_token={TOKEN}'
+r = requests.get(url)
 if r.status_code == 200:
-    data = r.json()
-    print(f'✅ Página encontrada')
-    print(f'   Nombre: {data.get(\"name\")}')
-    print(f'   ID: {data.get(\"id\")}')
+    print(f'✅ Página: {r.json().get(\"name\")}')
 else:
-    error = r.json().get('error', {})
-    print(f'❌ Error accediendo a página')
-    print(f'   Error: {error.get(\"message\")}')
-    print(f'   Código: {error.get(\"code\")}')
+    print(f'❌ Error página: {r.json()}')
     exit(1)
-print()
 
-# Test 3: Intentar leer conversaciones
-print('💬 Test 3: Intentando leer conversaciones...')
-conv_url = f'https://graph.facebook.com/v18.0/{PAGE_ID}/conversations?fields=messages{{from,message,created_time}},unread_count&access_token={TOKEN}'
-r = requests.get(conv_url)
+# Test 3: Conversaciones (PERMISOS CRÍTICOS)
+print()
+print('💬 Testeando permisos de mensajes...')
+url = f'https://graph.facebook.com/v18.0/{PAGE_ID}/conversations?fields=unread_count&access_token={TOKEN}'
+r = requests.get(url)
 
 if r.status_code == 200:
-    data = r.json()
-    conversations = data.get('data', [])
-    print(f'✅ Acceso concedido')
-    print(f'   Conversaciones encontradas: {len(conversations)}')
-    
-    total_unread = 0
-    for i, conv in enumerate(conversations[:3], 1):
-        unread = conv.get('unread_count', 0)
-        total_unread += unread
-        messages = conv.get('messages', {}).get('data', [])
-        
-        print(f'   [{i}] {len(messages)} mensajes, {unread} sin leer')
-        for msg in messages[:2]:
-            from_name = msg.get('from', {}).get('name', 'Desconocido')
-            text = msg.get('message', '')[:40]
-            print(f'       - {from_name}: {text}...')
-    
-    print(f'\\n📨 Total mensajes sin leer: {total_unread}')
-    
-    if total_unread == 0:
-        print('⚠️  No hay mensajes nuevos para responder')
-        print('   → Envía un mensaje de prueba a tu página de Facebook')
-        
+    convs = r.json().get('data', [])
+    total_unread = sum(c.get('unread_count', 0) for c in convs)
+    print(f'✅ PERMISOS OK - {len(convs)} conversaciones, {total_unread} sin leer')
 else:
-    error = r.json().get('error', {})
-    print(f'❌ SIN PERMISOS PARA MENSAJES')
-    print(f'   Error: {error.get(\"message\")}')
-    print(f'   Tipo: {error.get(\"type\")}')
-    print(f'   Código: {error.get(\"code\")}')
+    err = r.json().get('error', {})
+    print(f'❌ SIN PERMISOS: {err.get(\"message\")}')
     print()
-    print('🔧 SOLUCIÓN: Necesitas estos permisos en developers.facebook.com:')
-    print('   1. pages_messaging')
-    print('   2. pages_read_user_content')
-    print('   3. pages_manage_engagement')
-    print()
-    print('   Pasos:')
-    print('   - Ve a https://developers.facebook.com/tools/explorer/')
-    print('   - Selecciona tu app y página')
-    print('   - Marca los permisos que faltan')
-    print('   - Genera nuevo token')
-    print('   - Actualiza el secret en GitHub')
+    print('🔧 SOLUCIÓN: Ve a https://developers.facebook.com/tools/explorer/')
+    print('   Agrega estos permisos y genera nuevo token:')
+    print('   - pages_messaging')
+    print('   - pages_read_user_content')
+    print('   - pages_manage_engagement')
+    exit(1)
+
 print()
-
-# Test 4: Intentar leer publicaciones
-print('📝 Test 4: Intentando leer publicaciones...')
-posts_url = f'https://graph.facebook.com/v18.0/{PAGE_ID}/posts?fields=id,message,created_time&access_token={TOKEN}'
-r = requests.get(posts_url)
-
-if r.status_code == 200:
-    data = r.json()
-    posts = data.get('data', [])
-    print(f'✅ Acceso concedido')
-    print(f'   Publicaciones encontradas: {len(posts)}')
-    
-    for i, post in enumerate(posts[:3], 1):
-        text = post.get('message', 'Sin texto')[:50]
-        print(f'   [{i}] {text}...')
-        
-        # Intentar leer comentarios de este post
-        post_id = post.get('id')
-        comments_url = f'https://graph.facebook.com/v18.0/{post_id}/comments?fields=from,message,created_time&access_token={TOKEN}'
-        cr = requests.get(comments_url)
-        
-        if cr.status_code == 200:
-            comments = cr.json().get('data', [])
-            print(f'       └─ {len(comments)} comentarios')
-            for c in comments[:2]:
-                c_name = c.get('from', {}).get('name', 'Anónimo')
-                c_text = c.get('message', '')[:30]
-                print(f'          - {c_name}: {c_text}...')
-        else:
-            cerr = cr.json().get('error', {})
-            print(f'       └─ ❌ Sin permiso para leer comentarios: {cerr.get(\"message\", \"Error\")}')
-            
-else:
-    error = r.json().get('error', {})
-    print(f'❌ Error leyendo publicaciones')
-    print(f'   Error: {error.get(\"message\")}')
-print()
-
-# Test 5: Verificar permisos del token
-print('🔐 Test 5: Verificando permisos del token...')
-debug_url = f'https://graph.facebook.com/v18.0/debug_token?input_token={TOKEN}&access_token={TOKEN}'
-r = requests.get(debug_url)
-
-if r.status_code == 200:
-    data = r.json().get('data', {})
-    scopes = data.get('scopes', [])
-    print(f'✅ Permisos del token:')
-    for scope in scopes:
-        print(f'   ✓ {scope}')
-else:
-    print(f'⚠️  No se pudieron verificar permisos')
-print()
-
-print('='*60)
-print('🏁 Diagnóstico completado')
-print('='*60)
+print('==========================================')
+print('✅ TODO CORRECTO - Ejecutando bot...')
+print('==========================================')
 "
+    
+    - name: 🤖 EJECUTAR MODELFIT BOT
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
+        META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
+        META_VERIFY_TOKEN: ${{ secrets.META_VERIFY_TOKEN }}
+      run: python main.py
+    
+    - name: 💾 Guardar base de datos
+      run: |
+        git config user.email "action@github.com"
+        git config user.name "GitHub Actions"
+        git add database/conversations.db 2>/dev/null || true
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Update conversations $(date +%Y-%m-%d-%H:%M)" && git push)
+      continue-on-error: true
