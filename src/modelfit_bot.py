@@ -1,302 +1,250 @@
-import os
-import random
-from typing import List, Dict
-from datetime import datetime
+# src/modelfit_bot.py
 
-from .conversation_memory import ConversationMemory
-from .gemini_client import GeminiClient
-from .personality_engine import PersonalityEngine
-from .timing_humanizer import TimingHumanizer
-from .meta_api import MetaAPI
-from .utils import is_business_hours
-from config.prompts import SYSTEM_PROMPT, COMMENT_PROMPT
+import time
+import random
+import os
+from datetime import datetime
+from src.meta_api import MetaAPI
+from src.gemini_client import GeminiClient
+from src.conversation_memory import ConversationMemory
+
+# ─── CONFIGURACIÓN DE DELAYS (simula comportamiento humano) ──────────────────
+
+# Segundos mínimos y máximos antes de responder un mensaje
+MSG_DELAY_MIN = 60       # 1 minuto
+MSG_DELAY_MAX = 480      # 8 minutos
+
+# Segundos mínimos y máximos antes de responder un comentario
+COMMENT_DELAY_MIN = 120  # 2 minutos
+COMMENT_DELAY_MAX = 600  # 10 minutos
+
+# Segundos que simula "estar escribiendo" antes de enviar
+TYPING_MIN = 3
+TYPING_MAX = 12
+
+# Cada cuántos ciclos revisar si hay posts nuevos para compartir en historias
+STORY_CHECK_EVERY_N_CYCLES = 6  # cada ~6 ciclos (ajusta según frecuencia del loop)
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 class ModelFitBot:
-    """Bot principal de ModelFit."""
-    
     def __init__(self):
-        print(f"🏋️  Iniciando ModelFit Bot...")
-        
-        # Inicializar componentes
-        self.memory = ConversationMemory()
+        self.api = MetaAPI()
         self.gemini = GeminiClient()
-        self.personality = PersonalityEngine()
-        self.timing = TimingHumanizer(self.personality.behavior)
-        self.meta = MetaAPI()
-        
-        # Configuración
-        self.max_daily_messages = int(os.getenv('MAX_DAILY_MESSAGES', 50))
-        self.name = "ModelFit"
-        
-        print(f"✅ {self.name} lista para responder")
-    
-    def process_message(self, user_id: str, user_name: str, text: str,
-                       platform: str = "messenger") -> bool:
-        """
-        Procesa un mensaje directo y responde.
-        """
-        print(f"📩 Mensaje de {user_name} ({user_id}): {text[:60]}...")
-        
-        # Verificar rate limiting
-        daily_count = self.memory.get_daily_message_count(user_id)
-        print(f"    Mensajes hoy de este usuario: {daily_count}/{self.max_daily_messages}")
-        
-        if daily_count >= self.max_daily_messages:
-            print(f"    ⚠️  Usuario excedió límite diario")
-            return False
-        
-        # Verificar horario de atención
-        if not is_business_hours(self.personality.config):
-            out_msg = self.personality.get_out_of_hours_message()
-            print(f"    🌙 Fuera de horario, enviando mensaje automático")
-            self.meta.send_message(user_id, out_msg)
-            return True
-        
-        # Obtener historial de conversación
-        history = self.memory.get_conversation_history(user_id, limit=5)
-        print(f"    Historial: {len(history)} mensajes previos")
-        
-        # Calcular delay humanizado
-        complexity = self._assess_complexity(text)
-        delay = self.timing.calculate_delay(len(text), complexity)
-        print(f"    ⏱️  Delay calculado: {delay:.1f}s (complejidad: {complexity})")
-        
-        # Generar respuesta con Gemini
-        print(f"    🤖 Generando respuesta con Gemini...")
-        raw_response = self.gemini.generate_with_context(
-            SYSTEM_PROMPT, text, history
-        )
-        print(f"    Respuesta cruda: {raw_response[:60]}...")
-        
-        # Aplicar personalidad ModelFit
-        final_response = self.personality.format_response(
-            raw_response, user_name, platform
-        )
-        print(f"    Respuesta final: {final_response[:60]}...")
-        
-        # Simular typing indicator
-        typing_time = self.timing.simulate_typing(final_response)
-        print(f"    ⌨️  Simulando escritura: {typing_time:.1f}s")
-        
-        self.meta.send_typing_indicator(user_id)
-        self.timing.sleep_delay(delay)
-        
-        # Enviar respuesta
-        print(f"    📤 Enviando mensaje...")
-        success = self.meta.send_message(user_id, final_response, typing_time)
-        
-        if success:
-            # Guardar en memoria
-            self.memory.add_interaction(
-                user_id=user_id,
-                platform=platform,
-                message=text,
-                response=final_response,
-                metadata={'complexity': complexity, 'delay': delay}
-            )
-            print(f"    ✅ Mensaje enviado y guardado")
-        else:
-            print(f"    ❌ Falló el envío")
-        
-        return success
-    
-    def process_comment(self, comment_id: str, user_id: str, user_name: str,
-                       text: str, post_id: str) -> bool:
-        """
-        Procesa y responde a un comentario.
-        """
-        print(f"💬 Comentario de {user_name}: {text[:60]}...")
-        
-        # Generar respuesta más breve para comentarios
-        prompt = COMMENT_PROMPT.format(comment_text=text)
-        print(f"    🤖 Generando respuesta...")
-        raw_response = self.gemini.generate_response(prompt, temperature=0.6, 
-                                                     max_tokens=150)
-        
-        # Aplicar personalidad (más concisa para comentarios)
-        final_response = self.personality.format_response(raw_response, user_name)
-        
-        # Limitar longitud para comentarios
-        if len(final_response) > 200:
-            final_response = final_response[:197] + "..."
-            print(f"    ✂️  Truncado a 200 caracteres")
-        
-        # Delay más corto para comentarios
-        delay = random.uniform(15, 45)
-        print(f"    ⏱️  Delay: {delay:.1f}s")
-        self.timing.sleep_delay(delay)
-        
-        # Responder al comentario
-        print(f"    📤 Publicando respuesta...")
-        success = self.meta.reply_to_comment(comment_id, final_response)
-        
-        if success:
-            # Guardar en memoria como interacción
-            self.memory.add_interaction(
-                user_id=user_id,
-                platform="facebook_comment",
-                message=text,
-                response=final_response,
-                metadata={'post_id': post_id, 'comment_id': comment_id}
-            )
-            print(f"    ✅ Comentario respondido")
-        else:
-            print(f"    ❌ Falló la respuesta")
-        
-        return success
-    
+        self.memory = ConversationMemory()
+        self._cycle_count = 0
+        self._replied_messages = set()    # IDs de mensajes ya respondidos
+        self._replied_comments = set()    # IDs de comentarios ya respondidos
+        self._shared_posts = set()        # IDs de posts ya compartidos en historias
+        print("✅ ModelFitBot inicializado correctamente")
+
+    # ─── MENSAJES ─────────────────────────────────────────────────────────────
+
+    def process_messages(self):
+        print("\n📨 Revisando mensajes...")
+        messages = self.api.get_unread_messages(limit=10)
+
+        if not messages:
+            print("  No hay mensajes nuevos")
+            return
+
+        for msg in messages:
+            msg_id = msg["message_id"]
+            sender_id = msg["sender_id"]
+
+            if msg_id in self._replied_messages:
+                continue
+
+            # Si no hay texto ni imagen, saltar
+            if not msg["text"] and not msg["has_image"]:
+                continue
+
+            print(f"\n  💬 Mensaje de {msg['from_name']}: {msg['text'][:60]}...")
+
+            # Delay aleatorio humano antes de responder
+            delay = random.randint(MSG_DELAY_MIN, MSG_DELAY_MAX)
+            print(f"  ⏳ Esperando {delay}s para simular tiempo de respuesta...")
+            time.sleep(delay)
+
+            # Marcar como leído
+            self.api.mark_as_read(sender_id)
+
+            # Obtener historial de conversación
+            history = self.memory.get_conversation_history(sender_id, limit=6)
+
+            # Generar respuesta
+            if msg["has_image"]:
+                print("  🖼️ Imagen detectada, usando visión...")
+                response = self.gemini.generate_response_with_image(
+                    image_url=msg["image_url"],
+                    caption=msg["text"],
+                    conversation_history=history
+                )
+            else:
+                response = self.gemini.generate_response(
+                    user_message=msg["text"],
+                    conversation_history=history
+                )
+
+            # Simular que está escribiendo
+            typing_time = random.randint(TYPING_MIN, TYPING_MAX)
+            self.api.send_typing(sender_id)
+            time.sleep(typing_time)
+
+            # Enviar respuesta
+            sent = self.api.send_message(sender_id, response)
+
+            if sent:
+                # Guardar en memoria
+                self.memory.add_interaction(
+                    user_id=sender_id,
+                    platform="facebook_message",
+                    message=msg["text"] or "[imagen]",
+                    response=response
+                )
+                self._replied_messages.add(msg_id)
+                print(f"  ✅ Respondido: {response[:60]}...")
+
+    # ─── COMENTARIOS ──────────────────────────────────────────────────────────
+
+    def process_comments(self):
+        print("\n💬 Revisando comentarios...")
+        comments = self.api.get_recent_comments(post_limit=5)
+
+        if not comments:
+            print("  No hay comentarios nuevos")
+            return
+
+        new_comments = [c for c in comments if c["comment_id"] not in self._replied_comments]
+
+        if not new_comments:
+            print("  No hay comentarios nuevos sin responder")
+            return
+
+        print(f"  Encontrados {len(new_comments)} comentarios nuevos")
+
+        for comment in new_comments:
+            print(f"\n  💬 Comentario de {comment['commenter_name']}: {comment['text'][:60]}...")
+
+            # Delay aleatorio
+            delay = random.randint(COMMENT_DELAY_MIN, COMMENT_DELAY_MAX)
+            print(f"  ⏳ Esperando {delay}s...")
+            time.sleep(delay)
+
+            # Generar respuesta
+            if comment["has_image"]:
+                print("  🖼️ Imagen en comentario detectada...")
+                response = self.gemini.generate_response_with_image(
+                    image_url=comment["image_url"],
+                    caption=comment["text"],
+                )
+            else:
+                response = self.gemini.generate_comment_reply(
+                    comment_text=comment["text"],
+                    post_description=comment.get("post_message", "")
+                )
+
+            # Responder
+            sent = self.api.reply_to_comment(comment["comment_id"], response)
+
+            if sent:
+                self.memory.add_interaction(
+                    user_id=comment["commenter_id"],
+                    platform="facebook_comment",
+                    message=comment["text"] or "[imagen]",
+                    response=response
+                )
+                self._replied_comments.add(comment["comment_id"])
+                print(f"  ✅ Respondido: {response[:60]}...")
+
+    # ─── HISTORIAS ────────────────────────────────────────────────────────────
+
+    def process_stories(self):
+        print("\n📸 Revisando publicaciones para compartir en historias...")
+        posts = self.api.get_recent_posts(limit=3)
+
+        if not posts:
+            print("  No hay publicaciones recientes")
+            return
+
+        for post in posts:
+            if post["post_id"] in self._shared_posts:
+                continue
+
+            if not post.get("image_url") and not post.get("message"):
+                continue
+
+            print(f"\n  📄 Post encontrado: {post['message'][:60]}...")
+
+            # Generar caption atractivo con IA
+            caption = self.gemini.generate_story_caption(post.get("message", "Nueva publicación"))
+            print(f"  📝 Caption generado: {caption}")
+
+            # Intentar compartir como historia
+            shared = False
+
+            if post.get("image_url"):
+                shared = self.api.share_image_to_story(
+                    image_url=post["image_url"],
+                    caption=caption
+                )
+
+            if not shared:
+                shared = self.api.share_post_to_story(
+                    post_id=post["post_id"],
+                    caption=caption
+                )
+
+            if shared:
+                self._shared_posts.add(post["post_id"])
+                print(f"  ✅ Post compartido en historias!")
+            else:
+                print(f"  ⚠️ No se pudo compartir en historias")
+
+            # Solo compartir 1 post por ciclo para no saturar
+            break
+
+    # ─── CICLO PRINCIPAL ──────────────────────────────────────────────────────
+
     def run_cycle(self):
-        """
-        Ciclo principal: revisa mensajes y comentarios nuevos.
-        """
-        print(f"\n{'='*60}")
-        print(f"🔄 CICLO MODELFIT - {datetime.now()}")
-        print(f"{'='*60}")
-        
-        messages_processed = 0
-        comments_processed = 0
-        
-        # 1. Procesar mensajes directos
-        try:
-            print(f"\n📨 [MENSAJES] Buscando mensajes sin leer...")
-            unread = self.meta.get_unread_messages(limit=10)
-            print(f"    → Encontrados: {len(unread)} mensajes")
-            
-            for i, msg in enumerate(unread, 1):
-                print(f"\n    ─────────────────────────────")
-                print(f"    [{i}/{len(unread)}] De: {msg['from_name']} ({msg['from_id']})")
-                print(f"         Texto: {msg['text'][:80]}...")
-                print(f"         Fecha: {msg['created_time']}")
-                
-                result = self.process_message(
-                    user_id=msg['from_id'],
-                    user_name=msg['from_name'],
-                    text=msg['text'],
-                    platform="messenger"
-                )
-                
-                if result:
-                    messages_processed += 1
-                    # Marcar como leído
-                    mark_result = self.meta.mark_as_read(msg['conversation_id'])
-                    print(f"         Marcado como leído: {'✅' if mark_result else '❌'}")
-                else:
-                    print(f"         ⚠️  No se pudo procesar")
-                    
-        except Exception as e:
-            print(f"    ❌ ERROR en mensajes: {str(e)}")
-            import traceback
-            traceback.print_exc()
+        self._cycle_count += 1
+        now = datetime.now().strftime("%H:%M:%S")
+        print(f"\n{'='*50}")
+        print(f"🔄 CICLO #{self._cycle_count} - {now}")
+        print(f"{'='*50}")
 
-        # 2. Procesar comentarios
         try:
-            print(f"\n💬 [COMENTARIOS] Buscando comentarios recientes...")
-            comments = self.meta.get_recent_comments(post_limit=5)
-            recent_comments = self._filter_recent(comments, hours=2)
-            print(f"    → Comentarios recientes (2h): {len(recent_comments)}")
-            
-            for i, comment in enumerate(recent_comments, 1):
-                print(f"\n    ─────────────────────────────")
-                print(f"    [{i}/{len(recent_comments)}] De: {comment['from_name']}")
-                print(f"         Texto: {comment['text'][:80]}...")
-                print(f"         Post: {comment['post_id'][:20]}...")
-                
-                if self._already_responded(comment['from_id'], comment['text']):
-                    print(f"         ⏭️  Ya respondido anteriormente, saltando")
-                    continue
-                
-                result = self.process_comment(
-                    comment_id=comment['id'],
-                    user_id=comment['from_id'],
-                    user_name=comment['from_name'],
-                    text=comment['text'],
-                    post_id=comment['post_id']
-                )
-                
-                if result:
-                    comments_processed += 1
-                    
+            self.process_messages()
         except Exception as e:
-            print(f"    ❌ ERROR en comentarios: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            print(f"❌ Error en mensajes: {e}")
 
-        print(f"\n{'='*60}")
-        print(f"📊 RESUMEN DEL CICLO")
-        print(f"    Mensajes respondidos: {messages_processed}")
-        print(f"    Comentarios respondidos: {comments_processed}")
-        print(f"    Total interacciones: {messages_processed + comments_processed}")
-        print(f"{'='*60}\n")
-    
-    def _assess_complexity(self, text: str) -> str:
-        """Evalúa complejidad del mensaje para timing."""
-        text_lower = text.lower()
-        
-        # Preguntas complejas
-        complex_indicators = ['por qué', 'cómo', 'explica', 'recomienda', 
-                             'opinión', 'piensas', 'dieta', 'rutina completa',
-                             'plan', 'nutrición', 'suplementos']
-        if any(ind in text_lower for ind in complex_indicators):
-            return "complex"
-        
-        # Mensajes simples
-        simple_indicators = ['hola', 'gracias', 'ok', 'jaja', '❤️', '🔥', '👍', 'holi']
-        if any(ind in text_lower for ind in simple_indicators) and len(text) < 20:
-            return "simple"
-        
-        return "normal"
-    
-    def _filter_recent(self, items: List[Dict], hours: int = 2) -> List[Dict]:
-        """Filtra items por tiempo (últimas N horas)."""
-        from datetime import datetime, timedelta
-        
-        cutoff = datetime.now() - timedelta(hours=hours)
-        recent = []
-        
-        for item in items:
+        try:
+            self.process_comments()
+        except Exception as e:
+            print(f"❌ Error en comentarios: {e}")
+
+        # Revisar historias cada N ciclos
+        if self._cycle_count % STORY_CHECK_EVERY_N_CYCLES == 0:
             try:
-                created = datetime.fromisoformat(
-                    item['created_time'].replace('Z', '+00:00')
-                )
-                if created > cutoff:
-                    recent.append(item)
-            except:
-                # Si no podemos parsear fecha, incluir por si acaso
-                recent.append(item)
-        
-        return recent
-    
-    def _already_responded(self, user_id: str, text: str) -> bool:
-        """
-        Verifica si ya respondimos algo similar recientemente.
-        """
-        # Obtener últimas interacciones del usuario
-        history = self.memory.get_conversation_history(user_id, limit=3)
-        
-        for item in history:
-            # Si el mensaje entrante es muy similar a uno previo
-            if self._similarity(text, item['message']) > 0.8:
-                return True
-            # Si ya respondimos en los últimos 10 minutos
+                self.process_stories()
+            except Exception as e:
+                print(f"❌ Error en historias: {e}")
+
+    def run_forever(self, interval_seconds: int = 300):
+        """Loop infinito. Revisa mensajes y comentarios cada `interval_seconds` segundos."""
+        print(f"\n🚀 Bot iniciado. Revisando cada {interval_seconds}s...")
+        print("   Presiona Ctrl+C para detener\n")
+
+        while True:
             try:
-                msg_time = datetime.fromisoformat(item['timestamp'])
-                if (datetime.now() - msg_time).seconds < 600:  # 10 min
-                    return True
-            except:
-                pass
-        
-        return False
-    
-    def _similarity(self, text1: str, text2: str) -> float:
-        """Simplicidad: similaridad básica por palabras."""
-        words1 = set(text1.lower().split())
-        words2 = set(text2.lower().split())
-        
-        if not words1 or not words2:
-            return 0.0
-        
-        intersection = words1.intersection(words2)
-        union = words1.union(words2)
-        
-        return len(intersection) / len(union)
+                self.run_cycle()
+                print(f"\n💤 Durmiendo {interval_seconds}s hasta el próximo ciclo...")
+                time.sleep(interval_seconds)
+            except KeyboardInterrupt:
+                print("\n👋 Bot detenido manualmente")
+                break
+            except Exception as e:
+                print(f"❌ Error inesperado: {e}")
+                print("   Reintentando en 60s...")
+                time.sleep(60)
