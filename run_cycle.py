@@ -9,6 +9,9 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Desactivar delays bloqueantes — el scheduler de GitHub Actions maneja el timing
+os.environ["BOT_NO_DELAY"] = "true"
+
 from src.modelfit_bot import ModelFitBot
 
 if __name__ == "__main__":
