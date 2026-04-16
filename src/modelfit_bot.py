@@ -9,18 +9,24 @@ from src.gemini_client import GeminiClient
 from src.conversation_memory import ConversationMemory
 
 # ─── CONFIGURACIÓN DE DELAYS (simula comportamiento humano) ──────────────────
+# Si BOT_NO_DELAY=true (GitHub Actions), los delays se saltan.
+# En producción local (main.py) los delays funcionan normalmente.
 
-# Segundos mínimos y máximos antes de responder un mensaje
+NO_DELAY = os.environ.get("BOT_NO_DELAY", "false").lower() == "true"
+
 MSG_DELAY_MIN = 60       # 1 minuto
 MSG_DELAY_MAX = 480      # 8 minutos
-
-# Segundos mínimos y máximos antes de responder un comentario
 COMMENT_DELAY_MIN = 120  # 2 minutos
 COMMENT_DELAY_MAX = 600  # 10 minutos
-
-# Segundos que simula "estar escribiendo" antes de enviar
 TYPING_MIN = 3
 TYPING_MAX = 12
+
+def _sleep(seconds: int):
+    """Duerme solo si no estamos en modo sin delay."""
+    if NO_DELAY:
+        print(f"  ⏩ Delay omitido ({seconds}s) — modo GitHub Actions")
+        return
+    time.sleep(seconds)
 
 # Cada cuántos ciclos revisar si hay posts nuevos para compartir en historias
 STORY_CHECK_EVERY_N_CYCLES = 6  # cada ~6 ciclos (ajusta según frecuencia del loop)
@@ -65,7 +71,7 @@ class ModelFitBot:
             # Delay aleatorio humano antes de responder
             delay = random.randint(MSG_DELAY_MIN, MSG_DELAY_MAX)
             print(f"  ⏳ Esperando {delay}s para simular tiempo de respuesta...")
-            time.sleep(delay)
+            _sleep(delay)
 
             # Marcar como leído
             self.api.mark_as_read(sender_id)
@@ -90,7 +96,7 @@ class ModelFitBot:
             # Simular que está escribiendo
             typing_time = random.randint(TYPING_MIN, TYPING_MAX)
             self.api.send_typing(sender_id)
-            time.sleep(typing_time)
+            _sleep(typing_time)
 
             # Enviar respuesta
             sent = self.api.send_message(sender_id, response)
@@ -130,7 +136,7 @@ class ModelFitBot:
             # Delay aleatorio
             delay = random.randint(COMMENT_DELAY_MIN, COMMENT_DELAY_MAX)
             print(f"  ⏳ Esperando {delay}s...")
-            time.sleep(delay)
+            _sleep(delay)
 
             # Generar respuesta
             if comment["has_image"]:
