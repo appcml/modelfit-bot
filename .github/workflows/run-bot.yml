@@ -1,111 +1,34 @@
-name: ModelFit Bot Runner
+name: 🤖 ModelFit Bot
 
 on:
+  # Corre automáticamente cada 5 minutos
   schedule:
-    - cron: '*/3 * * * *'  # Cada 3 minutos
-  workflow_dispatch:        # Manual también disponible
+    - cron: '*/5 * * * *'
+
+  # También permite correrlo manualmente desde GitHub
+  workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 4  # Se detiene antes del próximo ciclo de 5 min
+
     steps:
-    - uses: actions/checkout@v4
-    
-    - uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-    
-    - name: Cache pip
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-    
-    - name: Instalar dependencias
-      run: pip install -r requirements.txt
-    
-    - name: 🔍 DIAGNÓSTICO DE CONEXIÓN
-      env:
-        META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
-        META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
-      run: |
-        echo "=========================================="
-        echo "🔍 DIAGNÓSTICO MODELFIT BOT"
-        echo "=========================================="
-        
-        python -c "
-import os
-import requests
+      - name: 📥 Descargar código
+        uses: actions/checkout@v4
 
-TOKEN = os.getenv('META_PAGE_ACCESS_TOKEN')
-PAGE_ID = os.getenv('META_PAGE_ID')
+      - name: 🐍 Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-if not TOKEN or not PAGE_ID:
-    print('❌ ERROR: Faltan variables de entorno')
-    exit(1)
+      - name: 📦 Instalar dependencias
+        run: pip install -r requirements.txt
 
-print(f'✅ Token: {TOKEN[:15]}...')
-print(f'✅ Page ID: {PAGE_ID}')
-print()
-
-# Test 1: Token válido
-url = f'https://graph.facebook.com/v18.0/me?access_token={TOKEN}'
-r = requests.get(url)
-if r.status_code == 200:
-    print('✅ Token válido')
-else:
-    print(f'❌ Token inválido: {r.json()}')
-    exit(1)
-
-# Test 2: Página
-url = f'https://graph.facebook.com/v18.0/{PAGE_ID}?fields=name&access_token={TOKEN}'
-r = requests.get(url)
-if r.status_code == 200:
-    print(f'✅ Página: {r.json().get(\"name\")}')
-else:
-    print(f'❌ Error página: {r.json()}')
-    exit(1)
-
-# Test 3: Conversaciones (PERMISOS CRÍTICOS)
-print()
-print('💬 Testeando permisos de mensajes...')
-url = f'https://graph.facebook.com/v18.0/{PAGE_ID}/conversations?fields=unread_count&access_token={TOKEN}'
-r = requests.get(url)
-
-if r.status_code == 200:
-    convs = r.json().get('data', [])
-    total_unread = sum(c.get('unread_count', 0) for c in convs)
-    print(f'✅ PERMISOS OK - {len(convs)} conversaciones, {total_unread} sin leer')
-else:
-    err = r.json().get('error', {})
-    print(f'❌ SIN PERMISOS: {err.get(\"message\")}')
-    print()
-    print('🔧 SOLUCIÓN: Ve a https://developers.facebook.com/tools/explorer/')
-    print('   Agrega estos permisos y genera nuevo token:')
-    print('   - pages_messaging')
-    print('   - pages_read_user_content')
-    print('   - pages_manage_engagement')
-    exit(1)
-
-print()
-print('==========================================')
-print('✅ TODO CORRECTO - Ejecutando bot...')
-print('==========================================')
-"
-    
-    - name: 🤖 EJECUTAR MODELFIT BOT
-      env:
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
-        META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
-        META_VERIFY_TOKEN: ${{ secrets.META_VERIFY_TOKEN }}
-      run: python main.py
-    
-    - name: 💾 Guardar base de datos
-      run: |
-        git config user.email "action@github.com"
-        git config user.name "GitHub Actions"
-        git add database/conversations.db 2>/dev/null || true
-        git diff --quiet && git diff --staged --quiet || (git commit -m "Update conversations $(date +%Y-%m-%d-%H:%M)" && git push)
-      continue-on-error: true
+      - name: 🚀 Ejecutar bot (un ciclo)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
+          META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
+          META_VERIFY_TOKEN: ${{ secrets.META_VERIFY_TOKEN }}
+        run: python run_cycle.py
