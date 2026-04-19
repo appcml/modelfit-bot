@@ -200,57 +200,65 @@ class MetaAPI:
             print(f"❌ Error get_recent_posts: {e}")
             return []
 
-    def share_post_to_story(self, post_id: str, caption: str = "") -> bool:
+    def share_image_to_story(self, image_url: str, caption: str = "") -> bool:
         """
-        Comparte una publicación existente en las historias de Facebook.
+        Publica una imagen como historia de Facebook.
+        Flujo correcto en 2 pasos:
+          1. Subir la foto sin publicar como post → obtener photo_id
+          2. Publicar el photo_id como historia via /photo_stories
         Requiere permiso: pages_manage_posts
         """
         try:
-            # Método 1: Compartir directamente el post como historia con link
-            page_url = f"https://www.facebook.com/{self.page_id}/posts/{post_id.split('_')[-1]}"
+            # Paso 1: Subir la foto sin publicar como post normal
+            print(f"  📤 Subiendo imagen para historia...")
+            upload = self._post(
+                f"{self.page_id}/photos",
+                {
+                    "url": image_url,
+                    "published": False,   # NO publicar como post del feed
+                }
+            )
+            photo_id = upload.get("id")
+            if not photo_id:
+                print("  ❌ No se obtuvo photo_id en el upload")
+                return False
 
-            # Crear historia con link a la publicación
+            print(f"  📤 Foto subida correctamente. photo_id: {photo_id}")
+
+            # Paso 2: Publicar la foto subida como historia
             result = self._post(
                 f"{self.page_id}/photo_stories",
                 {
-                    "link": page_url,
-                    "message": caption,
+                    "photo_id": photo_id,
                 }
             )
             print(f"  ✅ Historia publicada: {result}")
             return True
 
         except Exception as e:
-            print(f"  ⚠️ Método photo_stories falló, intentando con feed story: {e}")
-            try:
-                # Método 2: Publicar como historia desde imagen del post
-                result = self._post(
-                    f"{self.page_id}/stories",
-                    {
-                        "source_post_id": post_id,
-                        "message": caption,
-                    }
-                )
-                print(f"  ✅ Historia publicada (método 2): {result}")
-                return True
-            except Exception as e2:
-                print(f"  ❌ Error share_post_to_story: {e2}")
-                return False
+            print(f"  ❌ Error share_image_to_story: {e}")
+            return False
 
-    def share_image_to_story(self, image_url: str, caption: str = "") -> bool:
+    def share_post_to_story(self, post_id: str, caption: str = "") -> bool:
         """
-        Publica una imagen como historia de Facebook.
+        Fallback: obtiene la imagen del post y la publica como historia.
+        Si el post no tiene imagen, no es posible compartirlo como historia.
         """
         try:
-            result = self._post(
-                f"{self.page_id}/photo_stories",
-                {
-                    "url": image_url,
-                    "message": caption,
-                }
+            print(f"  🔍 Obteniendo imagen del post {post_id}...")
+            post_data = self._get(
+                post_id,
+                {"fields": "full_picture"}
             )
-            print(f"  ✅ Historia con imagen publicada: {result}")
-            return True
+            image_url = post_data.get("full_picture")
+
+            if not image_url:
+                print("  ⚠️ El post no tiene imagen disponible para historia")
+                return False
+
+            print(f"  🖼️ Imagen encontrada, publicando como historia...")
+            return self.share_image_to_story(image_url, caption)
+
         except Exception as e:
-            print(f"  ❌ Error share_image_to_story: {e}")
+            print(f"  ❌ Error share_post_to_story: {e}")
             return False
