@@ -1,264 +1,338 @@
-# src/meta_api.py
+# src/modelfit_bot.py
 
+import time
+import random
 import os
-import requests
-from dotenv import load_dotenv
+import json
+from datetime import datetime, date
+from src.meta_api import MetaAPI
+from src.gemini_client import GeminiClient
+from src.conversation_memory import ConversationMemory
 
-load_dotenv()
+# ─── CONFIGURACIÓN ───────────────────────────────────────────────────────────
 
-GRAPH_API = "https://graph.facebook.com/v19.0"
+NO_DELAY = os.environ.get("BOT_NO_DELAY", "false").lower() == "true"
+
+# Delays para mensajes y comentarios (segundos)
+MSG_DELAY_MIN     = 60    # 1 minuto
+MSG_DELAY_MAX     = 600   # 10 minutos
+COMMENT_DELAY_MIN = 60    # 1 minuto
+COMMENT_DELAY_MAX = 600   # 10 minutos
+TYPING_MIN        = 3
+TYPING_MAX        = 12
+
+# Horario de silencio: el bot NO responde mensajes ni comentarios en este rango
+SILENT_HOUR_START = 22   # 22:00
+SILENT_HOUR_END   = 9    # 09:00
+
+# Historias: cuántas publicar por día y en qué horario
+STORIES_PER_DAY   = 10
+# Horas del día en que se pueden publicar historias (fuera del silencio)
+STORY_HOURS = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+
+# Archivo de persistencia para historias ya publicadas
+STORIES_LOG_FILE = "database/stories_log.json"
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 
-class MetaAPI:
+def _sleep(seconds: int):
+    if NO_DELAY:
+        print(f"  ⏩ Delay omitido ({seconds}s) — modo GitHub Actions")
+        return
+    time.sleep(seconds)
+
+
+def _is_silent_hours() -> bool:
+    """Devuelve True si estamos en el horario de silencio (22:00 - 09:00)."""
+    hora = datetime.now().hour
+    if SILENT_HOUR_START <= 23:
+        # Rango cruza medianoche: 22..23 o 0..8
+        return hora >= SILENT_HOUR_START or hora < SILENT_HOUR_END
+    return False
+
+
+def _load_stories_log() -> dict:
+    """Carga el log de historias publicadas desde disco."""
+    if os.path.exists(STORIES_LOG_FILE):
+        try:
+            with open(STORIES_LOG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_stories_log(log: dict):
+    """Guarda el log de historias publicadas en disco."""
+    os.makedirs(os.path.dirname(STORIES_LOG_FILE), exist_ok=True)
+    with open(STORIES_LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(log, f, indent=2, ensure_ascii=False)
+
+
+class ModelFitBot:
     def __init__(self):
-        self.access_token = os.getenv("META_PAGE_ACCESS_TOKEN")
-        self.page_id = os.getenv("META_PAGE_ID")
+        self.api    = MetaAPI()
+        self.gemini = GeminiClient()
+        self.memory = ConversationMemory()
 
-        if not self.access_token or not self.page_id:
-            raise ValueError("META_PAGE_ACCESS_TOKEN o META_PAGE_ID no configurados")
+        self._cycle_count      = 0
+        self._replied_messages = set()
+        self._replied_comments = set()
 
-    def _get(self, endpoint: str, params: dict = None) -> dict:
-        params = params or {}
-        params["access_token"] = self.access_token
-        r = requests.get(f"{GRAPH_API}/{endpoint}", params=params, timeout=15)
-        r.raise_for_status()
-        return r.json()
+        # Log persistente: { "YYYY-MM-DD": ["post_id1", "post_id2", ...] }
+        self._stories_log = _load_stories_log()
 
-    def _post(self, endpoint: str, data: dict = None) -> dict:
-        data = data or {}
-        data["access_token"] = self.access_token
-        r = requests.post(f"{GRAPH_API}/{endpoint}", json=data, timeout=15)
-        r.raise_for_status()
-        return r.json()
+        print("✅ ModelFitBot inicializado correctamente")
+        print(f"   Horario de silencio: {SILENT_HOUR_START}:00 → {SILENT_HOUR_END}:00")
+        print(f"   Historias por día: {STORIES_PER_DAY}")
 
-    # ─── MENSAJES ────────────────────────────────────────────────────────────
+    # ─── HELPERS DE HISTORIAS ────────────────────────────────────────────────
 
-    def get_unread_messages(self, limit: int = 10) -> list:
-        """Obtiene conversaciones recientes de la página."""
-        try:
-            data = self._get(
-                f"{self.page_id}/conversations",
-                {"fields": "participants,messages{message,from,attachments}", "limit": limit}
-            )
-            result = []
-            for conv in data.get("data", []):
-                msgs = conv.get("messages", {}).get("data", [])
-                if not msgs:
-                    continue
-                last = msgs[0]
-                participants = conv.get("participants", {}).get("data", [])
-                sender = next((p for p in participants if p["id"] != self.page_id), None)
-                if not sender:
-                    continue
+    def _today_key(self) -> str:
+        return date.today().isoformat()
 
-                # Detectar si hay adjunto (imagen)
-                attachments = last.get("attachments", {}).get("data", [])
-                image_url = None
-                if attachments:
-                    for att in attachments:
-                        if att.get("image_data"):
-                            image_url = att["image_data"].get("url")
-                        elif att.get("file_url"):
-                            image_url = att["file_url"]
+    def _stories_today(self) -> list:
+        return self._stories_log.get(self._today_key(), [])
 
-                result.append({
-                    "conversation_id": conv["id"],
-                    "sender_id": sender["id"],
-                    "from_name": sender.get("name", "Usuario"),
-                    "text": last.get("message", ""),
-                    "message_id": last["id"],
-                    "image_url": image_url,
-                    "has_image": image_url is not None,
-                })
-            return result
-        except Exception as e:
-            print(f"❌ Error get_unread_messages: {e}")
-            return []
+    def _mark_story_published(self, post_id: str):
+        key = self._today_key()
+        if key not in self._stories_log:
+            self._stories_log[key] = []
+        self._stories_log[key].append(post_id)
+        _save_stories_log(self._stories_log)
 
-    def send_message(self, recipient_id: str, text: str) -> bool:
-        """Envía un mensaje directo a un usuario."""
-        try:
-            self._post(
-                f"{self.page_id}/messages",
-                {
-                    "recipient": {"id": recipient_id},
-                    "message": {"text": text},
-                    "messaging_type": "RESPONSE"
-                }
-            )
-            print(f"  ✅ Mensaje enviado a {recipient_id}")
-            return True
-        except Exception as e:
-            print(f"  ❌ Error send_message: {e}")
-            return False
+    def _already_shared_today(self, post_id: str) -> bool:
+        return post_id in self._stories_today()
 
-    def mark_as_read(self, recipient_id: str):
-        """Marca la conversación como leída."""
-        try:
-            self._post(
-                f"{self.page_id}/messages",
-                {
-                    "recipient": {"id": recipient_id},
-                    "sender_action": "mark_seen"
-                }
-            )
-        except Exception:
-            pass
+    def _all_ever_shared(self) -> set:
+        """Todos los post_ids compartidos alguna vez (para no repetir en el día)."""
+        all_ids = set()
+        for ids in self._stories_log.values():
+            all_ids.update(ids)
+        return all_ids
 
-    def send_typing(self, recipient_id: str):
-        """Simula que está escribiendo."""
-        try:
-            self._post(
-                f"{self.page_id}/messages",
-                {
-                    "recipient": {"id": recipient_id},
-                    "sender_action": "typing_on"
-                }
-            )
-        except Exception:
-            pass
+    # ─── MENSAJES ─────────────────────────────────────────────────────────────
 
-    # ─── COMENTARIOS ─────────────────────────────────────────────────────────
+    def process_messages(self):
+        if _is_silent_hours():
+            print("\n🌙 Horario de silencio — no se responden mensajes")
+            return
 
-    def get_recent_comments(self, post_limit: int = 5) -> list:
-        """Obtiene comentarios recientes de las últimas publicaciones."""
-        try:
-            posts_data = self._get(
-                f"{self.page_id}/posts",
-                {"fields": "id,message,created_time", "limit": post_limit}
-            )
-            result = []
-            for post in posts_data.get("data", []):
-                comments_data = self._get(
-                    f"{post['id']}/comments",
-                    {"fields": "id,message,from,created_time,attachments", "limit": 20}
+        print("\n📨 Revisando mensajes...")
+        messages = self.api.get_unread_messages(limit=10)
+
+        if not messages:
+            print("  No hay mensajes nuevos")
+            return
+
+        for msg in messages:
+            msg_id    = msg["message_id"]
+            sender_id = msg["sender_id"]
+
+            if msg_id in self._replied_messages:
+                continue
+            if not msg["text"] and not msg["has_image"]:
+                continue
+
+            print(f"\n  💬 Mensaje de {msg['from_name']}: {msg['text'][:60]}...")
+
+            delay = random.randint(MSG_DELAY_MIN, MSG_DELAY_MAX)
+            print(f"  ⏳ Esperando {delay}s antes de responder...")
+            _sleep(delay)
+
+            # Verificar silencio de nuevo tras el delay (pudo pasar la hora)
+            if _is_silent_hours():
+                print("  🌙 Entró en horario de silencio durante el delay, se responderá mañana")
+                break
+
+            self.api.mark_as_read(sender_id)
+            history = self.memory.get_conversation_history(sender_id, limit=6)
+
+            if msg["has_image"]:
+                print("  🖼️ Imagen detectada, usando visión...")
+                response = self.gemini.generate_response_with_image(
+                    image_url=msg["image_url"],
+                    caption=msg["text"],
+                    conversation_history=history
                 )
-                for comment in comments_data.get("data", []):
-                    attachments = comment.get("attachments", {}).get("data", [])
-                    image_url = None
-                    if attachments:
-                        for att in attachments:
-                            if att.get("media", {}).get("image", {}).get("src"):
-                                image_url = att["media"]["image"]["src"]
+            else:
+                response = self.gemini.generate_response(
+                    user_message=msg["text"],
+                    conversation_history=history
+                )
 
-                    result.append({
-                        "comment_id": comment["id"],
-                        "post_id": post["id"],
-                        "post_message": post.get("message", ""),
-                        "commenter_id": comment.get("from", {}).get("id", ""),
-                        "commenter_name": comment.get("from", {}).get("name", "Usuario"),
-                        "text": comment.get("message", ""),
-                        "image_url": image_url,
-                        "has_image": image_url is not None,
-                    })
-            return result
-        except Exception as e:
-            print(f"❌ Error get_recent_comments: {e}")
-            return []
+            typing_time = random.randint(TYPING_MIN, TYPING_MAX)
+            self.api.send_typing(sender_id)
+            _sleep(typing_time)
 
-    def reply_to_comment(self, comment_id: str, text: str) -> bool:
-        """Responde a un comentario."""
-        try:
-            self._post(
-                f"{comment_id}/comments",
-                {"message": text}
-            )
-            print(f"  ✅ Comentario respondido: {comment_id}")
-            return True
-        except Exception as e:
-            print(f"  ❌ Error reply_to_comment: {e}")
-            return False
+            sent = self.api.send_message(sender_id, response)
+            if sent:
+                self.memory.add_interaction(
+                    user_id=sender_id,
+                    platform="facebook_message",
+                    message=msg["text"] or "[imagen]",
+                    response=response
+                )
+                self._replied_messages.add(msg_id)
+                print(f"  ✅ Respondido: {response[:60]}...")
+
+    # ─── COMENTARIOS ──────────────────────────────────────────────────────────
+
+    def process_comments(self):
+        if _is_silent_hours():
+            print("\n🌙 Horario de silencio — no se responden comentarios")
+            return
+
+        print("\n💬 Revisando comentarios...")
+        comments = self.api.get_recent_comments(post_limit=5)
+
+        if not comments:
+            print("  No hay comentarios nuevos")
+            return
+
+        new_comments = [c for c in comments if c["comment_id"] not in self._replied_comments]
+        if not new_comments:
+            print("  No hay comentarios nuevos sin responder")
+            return
+
+        print(f"  Encontrados {len(new_comments)} comentarios nuevos")
+
+        for comment in new_comments:
+            print(f"\n  💬 Comentario de {comment['commenter_name']}: {comment['text'][:60]}...")
+
+            delay = random.randint(COMMENT_DELAY_MIN, COMMENT_DELAY_MAX)
+            print(f"  ⏳ Esperando {delay}s...")
+            _sleep(delay)
+
+            if _is_silent_hours():
+                print("  🌙 Entró en horario de silencio, comentarios restantes se responden mañana")
+                break
+
+            if comment["has_image"]:
+                print("  🖼️ Imagen en comentario detectada...")
+                response = self.gemini.generate_response_with_image(
+                    image_url=comment["image_url"],
+                    caption=comment["text"],
+                )
+            else:
+                response = self.gemini.generate_comment_reply(
+                    comment_text=comment["text"],
+                    post_description=comment.get("post_message", "")
+                )
+
+            sent = self.api.reply_to_comment(comment["comment_id"], response)
+            if sent:
+                self.memory.add_interaction(
+                    user_id=comment["commenter_id"],
+                    platform="facebook_comment",
+                    message=comment["text"] or "[imagen]",
+                    response=response
+                )
+                self._replied_comments.add(comment["comment_id"])
+                print(f"  ✅ Respondido: {response[:60]}...")
 
     # ─── HISTORIAS ────────────────────────────────────────────────────────────
 
-    def get_recent_posts(self, limit: int = 5) -> list:
-        """Obtiene las publicaciones recientes de la página."""
+    def process_stories(self):
+        """
+        Publica historias desde publicaciones antiguas de la página.
+        - Máximo STORIES_PER_DAY historias al día
+        - Solo publica en horas permitidas (fuera del silencio)
+        - Selección aleatoria de posts (imágenes y reels)
+        - Persiste en disco para no repetir durante el día
+        """
+        hora_actual = datetime.now().hour
+
+        # No publicar historias en horario de silencio
+        if hora_actual not in STORY_HOURS:
+            print(f"\n📸 Historias: hora {hora_actual}:00 fuera del horario permitido, saltando...")
+            return
+
+        stories_hoy = self._stories_today()
+        if len(stories_hoy) >= STORIES_PER_DAY:
+            print(f"\n📸 Historias: ya se publicaron {STORIES_PER_DAY} historias hoy ✅")
+            return
+
+        restantes = STORIES_PER_DAY - len(stories_hoy)
+        print(f"\n📸 Revisando historias... ({len(stories_hoy)}/{STORIES_PER_DAY} hoy, faltan {restantes})")
+
+        # Obtener todos los posts disponibles
+        all_posts = self.api.get_all_posts(limit=50)
+        if not all_posts:
+            print("  No hay posts disponibles")
+            return
+
+        # Filtrar los que ya se compartieron hoy
+        ya_compartidos = self._all_ever_shared()
+        disponibles = [p for p in all_posts if p["post_id"] not in ya_compartidos]
+
+        # Si ya se usaron todos, permitir repetir (ciclo completo)
+        if not disponibles:
+            print("  ♻️ Todos los posts usados antes, reiniciando pool...")
+            disponibles = all_posts
+
+        # Mezclar aleatoriamente
+        random.shuffle(disponibles)
+
+        # Publicar 1 historia por ciclo (se distribuyen a lo largo del día)
+        post = disponibles[0]
+        print(f"\n  📄 Post seleccionado ({post['media_type']}): {post['message'][:60]}...")
+
+        shared = self.api.share_post_to_story(post)
+
+        if shared:
+            self._mark_story_published(post["post_id"])
+            total_hoy = len(self._stories_today())
+            print(f"  ✅ Historia publicada! Total hoy: {total_hoy}/{STORIES_PER_DAY}")
+        else:
+            print(f"  ⚠️ No se pudo publicar la historia")
+
+    # ─── CICLO PRINCIPAL ──────────────────────────────────────────────────────
+
+    def run_cycle(self):
+        self._cycle_count += 1
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        hora = datetime.now().hour
+        en_silencio = _is_silent_hours()
+
+        print(f"\n{'='*50}")
+        print(f"🔄 CICLO #{self._cycle_count} — {now}")
+        if en_silencio:
+            print(f"🌙 MODO SILENCIO ({SILENT_HOUR_START}:00 - {SILENT_HOUR_END}:00)")
+        print(f"{'='*50}")
+
         try:
-            data = self._get(
-                f"{self.page_id}/posts",
-                {"fields": "id,message,full_picture,created_time,attachments", "limit": limit}
-            )
-            result = []
-            for post in data.get("data", []):
-                image_url = post.get("full_picture", "")
-
-                # Intentar obtener imagen del primer adjunto si no hay full_picture
-                if not image_url:
-                    attachments = post.get("attachments", {}).get("data", [])
-                    if attachments:
-                        media = attachments[0].get("media", {})
-                        image_url = media.get("image", {}).get("src", "")
-
-                result.append({
-                    "post_id": post["id"],
-                    "message": post.get("message", ""),
-                    "image_url": image_url,
-                    "created_time": post.get("created_time", ""),
-                })
-            return result
+            self.process_messages()
         except Exception as e:
-            print(f"❌ Error get_recent_posts: {e}")
-            return []
+            print(f"❌ Error en mensajes: {e}")
 
-    def share_image_to_story(self, image_url: str, caption: str = "") -> bool:
-        """
-        Publica una imagen como historia de Facebook.
-        Flujo correcto en 2 pasos:
-          1. Subir la foto sin publicar como post → obtener photo_id
-          2. Publicar el photo_id como historia via /photo_stories
-        Requiere permiso: pages_manage_posts
-        """
         try:
-            # Paso 1: Subir la foto sin publicar como post normal
-            print(f"  📤 Subiendo imagen para historia...")
-            upload = self._post(
-                f"{self.page_id}/photos",
-                {
-                    "url": image_url,
-                    "published": False,   # NO publicar como post del feed
-                }
-            )
-            photo_id = upload.get("id")
-            if not photo_id:
-                print("  ❌ No se obtuvo photo_id en el upload")
-                return False
-
-            print(f"  📤 Foto subida correctamente. photo_id: {photo_id}")
-
-            # Paso 2: Publicar la foto subida como historia
-            result = self._post(
-                f"{self.page_id}/photo_stories",
-                {
-                    "photo_id": photo_id,
-                }
-            )
-            print(f"  ✅ Historia publicada: {result}")
-            return True
-
+            self.process_comments()
         except Exception as e:
-            print(f"  ❌ Error share_image_to_story: {e}")
-            return False
+            print(f"❌ Error en comentarios: {e}")
 
-    def share_post_to_story(self, post_id: str, caption: str = "") -> bool:
-        """
-        Fallback: obtiene la imagen del post y la publica como historia.
-        Si el post no tiene imagen, no es posible compartirlo como historia.
-        """
         try:
-            print(f"  🔍 Obteniendo imagen del post {post_id}...")
-            post_data = self._get(
-                post_id,
-                {"fields": "full_picture"}
-            )
-            image_url = post_data.get("full_picture")
-
-            if not image_url:
-                print("  ⚠️ El post no tiene imagen disponible para historia")
-                return False
-
-            print(f"  🖼️ Imagen encontrada, publicando como historia...")
-            return self.share_image_to_story(image_url, caption)
-
+            self.process_stories()
         except Exception as e:
-            print(f"  ❌ Error share_post_to_story: {e}")
-            return False
+            print(f"❌ Error en historias: {e}")
+
+    def run_forever(self, interval_seconds: int = 300):
+        """Loop infinito. Revisa todo cada `interval_seconds` segundos."""
+        print(f"\n🚀 Bot iniciado. Revisando cada {interval_seconds//60} minutos...")
+        print(f"   Silencio: {SILENT_HOUR_START}:00 → {SILENT_HOUR_END}:00")
+        print(f"   Historias: {STORIES_PER_DAY}/día en horario {STORY_HOURS[0]}:00 - {STORY_HOURS[-1]}:00")
+        print("   Presiona Ctrl+C para detener\n")
+
+        while True:
+            try:
+                self.run_cycle()
+                print(f"\n💤 Durmiendo {interval_seconds}s hasta el próximo ciclo...")
+                time.sleep(interval_seconds)
+            except KeyboardInterrupt:
+                print("\n👋 Bot detenido manualmente")
+                break
+            except Exception as e:
+                print(f"❌ Error inesperado: {e}")
+                print("   Reintentando en 60s...")
+                time.sleep(60)
